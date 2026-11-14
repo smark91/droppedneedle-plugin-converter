@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    environment:
+      - SLSKD_APP_DIR=/app
+    volumes:
+      - ./slskd/config:/app
+      - ./slskd/downloads:/app/downloads
+      # Mount this conversion script into the container's /scripts directory
+      - ./convert.py:/scripts/convert.py:ro
+      # Mount DroppedNeedle's import folder so slskd can write into it
+      - ./droppedneedle/import:/import
+    ports:
+      - "5030:5030"
+      - "50300:50300"
+    restart: unless-stopped
+
+  droppedneedle:
+    image: ghcr.io/droppedneedle/droppedneedle:latest
+    container_name: droppedneedle
+    environment:
+      - TZ=UTC
+    volumes:
+      - ./droppedneedle/config:/app/config
+      - ./droppedneedle/music:/music
+      # DroppedNeedle watches this folder and auto-imports completed albums
+      - ./droppedneedle/import:/data/import
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
