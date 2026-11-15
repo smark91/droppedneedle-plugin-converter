@@ -8,10 +8,11 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".aif", ".aiff"}
 LOSSY_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".wma"}
@@ -78,8 +79,8 @@ def find_tracks_in_db(
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         cursor = conn.cursor()
 
-        # 1. First attempt: match by download_task_id
-        if task_id:
+        # 1. Match by download_task_id
+        if task_id and task_id != "__sweep__":
             cursor.execute(
                 "SELECT id, file_path, relative_path, root_id, row_revision "
                 "FROM local_tracks WHERE download_task_id = ?",
@@ -96,7 +97,7 @@ def find_tracks_in_db(
                     )
                 )
 
-        # 2. Second attempt: match by release_group_mbid if task query returned nothing
+        # 2. Match by release_group_mbid
         if not tracks and release_group_mbid:
             cursor.execute(
                 "SELECT t.id, t.file_path, t.relative_path, t.root_id, t.row_revision "
@@ -119,6 +120,44 @@ def find_tracks_in_db(
         conn.close()
     except Exception as err:
         logging.warning("Failed querying library.db at %s: %s", db_path, err)
+
+    return tracks
+
+
+def find_unconverted_tracks_in_db(db_path: Path, convert_lossy: bool) -> List[TrackRecord]:
+    """Find any remaining unconverted lossless (or lossy) tracks in library.db."""
+    if not db_path.exists():
+        return []
+
+    tracks: List[TrackRecord] = []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = conn.cursor()
+
+        formats = ["flac", "wav", "alac", "aiff"]
+        if convert_lossy:
+            formats.extend(["mp3", "m4a", "aac", "ogg", "wma"])
+
+        placeholders = ",".join("?" for _ in formats)
+        query = (
+            f"SELECT id, file_path, relative_path, root_id, row_revision "
+            f"FROM local_tracks WHERE lower(file_format) IN ({placeholders}) "
+            f"AND availability = 'indexed'"
+        )
+        cursor.execute(query, formats)
+        for row in cursor.fetchall():
+            tracks.append(
+                TrackRecord(
+                    track_id=row[0],
+                    file_path=Path(row[1]),
+                    relative_path=row[2],
+                    root_id=row[3],
+                    row_revision=row[4],
+                )
+            )
+        conn.close()
+    except Exception as err:
+        logging.warning("Failed querying unconverted tracks from %s: %s", db_path, err)
 
     return tracks
 
@@ -165,7 +204,7 @@ def update_track_in_db(
 
 
 class AutoOpusConverter:
-    """DroppedNeedle plugin listening to download events and transcoding to Opus."""
+    """DroppedNeedle plugin listening to download and request events and transcoding to Opus."""
 
     def __init__(self, context):
         self.ctx = context
@@ -175,21 +214,30 @@ class AutoOpusConverter:
 
     async def on_event(self, event) -> None:
         """Handle incoming server events within 5 seconds."""
-        if getattr(event, "kind", None) != "download_completed":
+        kind = getattr(event, "kind", "")
+        # Accept download_completed, request_fulfilled, and import_finished to safeguard against DroppedNeedle's dropped event limit
+        if kind not in ("download_completed", "request_fulfilled", "import_finished"):
             return
 
         payload = getattr(event, "payload", {})
-        outcome = getattr(payload, "outcome", "") or (payload.get("outcome") if isinstance(payload, dict) else "")
-        if outcome not in ("completed", "partial"):
-            return
-
         task_id = getattr(payload, "task_id", "") or (payload.get("task_id") if isinstance(payload, dict) else "")
         rg_mbid = getattr(payload, "release_group_mbid", "") or (
             payload.get("release_group_mbid") if isinstance(payload, dict) else ""
         )
 
-        self.ctx.logger.info("Queued auto-conversion for download task %s (mbid %s)", task_id, rg_mbid)
-        self.queue.put((task_id, rg_mbid))
+        # For download_completed, ensure outcome is completed or partial
+        if kind == "download_completed":
+            outcome = getattr(payload, "outcome", "") or (payload.get("outcome") if isinstance(payload, dict) else "")
+            if outcome not in ("completed", "partial"):
+                return
+
+        if task_id or rg_mbid:
+            self.ctx.logger.info("Queued auto-conversion on event %s (task: %s, mbid: %s)", kind, task_id, rg_mbid)
+            self.queue.put((task_id, rg_mbid))
+
+    async def on_tick(self) -> None:
+        """Periodic safety net to catch any unconverted tracks whose events were dropped."""
+        self.queue.put(("__sweep__", ""))
 
     def _worker_loop(self) -> None:
         """Process queued conversion tasks sequentially in background."""
@@ -200,11 +248,26 @@ class AutoOpusConverter:
                 continue
 
             try:
-                self._process_download(task_id, rg_mbid)
+                if task_id == "__sweep__":
+                    self._process_sweep()
+                else:
+                    self._process_download(task_id, rg_mbid)
             except Exception as err:
-                self.ctx.logger.error("Error processing download %s: %s", task_id, err)
+                self.ctx.logger.error("Error processing task %s / %s: %s", task_id, rg_mbid, err)
             finally:
                 self.queue.task_done()
+
+    def _process_sweep(self) -> None:
+        """Sweep library.db and transcode any unconverted files."""
+        cache_path = Path(self.ctx.settings.get("cache_path") or "/app/cache")
+        db_path = cache_path / "library.db"
+        bitrate = self.ctx.settings.get("bitrate") or "160k"
+        convert_lossy = str(self.ctx.settings.get("convert_lossy", "")).lower() in ("true", "1", "yes")
+
+        tracks = find_unconverted_tracks_in_db(db_path, convert_lossy)
+        if tracks:
+            self.ctx.logger.info("Periodic sweep found %d unconverted track(s)", len(tracks))
+            self._convert_tracks(tracks, db_path, bitrate, convert_lossy)
 
     def _process_download(self, task_id: str, rg_mbid: str) -> None:
         cache_path = Path(self.ctx.settings.get("cache_path") or "/app/cache")
@@ -214,9 +277,19 @@ class AutoOpusConverter:
 
         tracks = find_tracks_in_db(db_path, task_id, rg_mbid)
         if not tracks:
-            self.ctx.logger.info("No matching tracks located in database for task %s", task_id)
+            # Short sleep and retry once in case the database transaction is settling
+            time.sleep(1.0)
+            tracks = find_tracks_in_db(db_path, task_id, rg_mbid)
+
+        if not tracks:
+            self.ctx.logger.info("No matching tracks in database for task %s / mbid %s", task_id, rg_mbid)
             return
 
+        self._convert_tracks(tracks, db_path, bitrate, convert_lossy)
+
+    def _convert_tracks(
+        self, tracks: List[TrackRecord], db_path: Path, bitrate: str, convert_lossy: bool
+    ) -> None:
         for track in tracks:
             src = track.file_path
             suffix = src.suffix.lower()

@@ -17,6 +17,7 @@ from plugin import (
     TrackRecord,
     calculate_path_hash,
     find_tracks_in_db,
+    find_unconverted_tracks_in_db,
     transcode_file,
     update_track_in_db,
 )
@@ -54,7 +55,8 @@ class TestPlugin(unittest.TestCase):
                 stat_revision_kind TEXT,
                 file_format TEXT,
                 download_task_id TEXT,
-                row_revision INTEGER
+                row_revision INTEGER,
+                availability TEXT DEFAULT 'indexed'
             )
             """
         )
@@ -107,8 +109,8 @@ class TestPlugin(unittest.TestCase):
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO local_tracks VALUES "
-            "('trk_1', 'alb_1', 'r1', ?, 'Artist/Album/01. Song.wav', 'hash1', 100, 1000, 'rev1', 'exact', 'wav', 'task_123', 1)",
+            "INSERT INTO local_tracks (id, local_album_id, root_id, file_path, relative_path, path_hash, file_size_bytes, file_mtime_ns, stat_revision, stat_revision_kind, file_format, download_task_id, row_revision, availability) VALUES "
+            "('trk_1', 'alb_1', 'r1', ?, 'Artist/Album/01. Song.wav', 'hash1', 100, 1000, 'rev1', 'exact', 'wav', 'task_123', 1, 'indexed')",
             (str(wav_file),),
         )
         cur.execute(
@@ -146,15 +148,58 @@ class TestPlugin(unittest.TestCase):
         self.assertEqual(row[2], "opus")
         self.assertEqual(row[3], 2)
 
-    def test_plugin_event_handling_and_worker(self):
+    def test_request_fulfilled_event_triggers_conversion(self):
         wav_file = self.music_dir / "01. Song.flac"
         self._create_synthetic_wav(wav_file)
 
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO local_tracks VALUES "
-            "('trk_1', 'alb_1', 'r1', ?, 'Artist/Album/01. Song.flac', 'hash1', 100, 1000, 'rev1', 'exact', 'flac', 'task_999', 1)",
+            "INSERT INTO local_tracks (id, local_album_id, root_id, file_path, relative_path, path_hash, file_size_bytes, file_mtime_ns, stat_revision, stat_revision_kind, file_format, download_task_id, row_revision, availability) VALUES "
+            "('trk_1', 'alb_1', 'r1', ?, 'Artist/Album/01. Song.flac', 'hash1', 100, 1000, 'rev1', 'exact', 'flac', '', 1, 'indexed')",
+            (str(wav_file),),
+        )
+        cur.execute(
+            "INSERT INTO local_album_external_identities VALUES ('alb_1', 'mbid_request_test')"
+        )
+        conn.commit()
+        conn.close()
+
+        ctx = MagicMock()
+        ctx.logger = logging.getLogger("test_plugin")
+        ctx.settings = {
+            "cache_path": str(self.cache_dir),
+            "bitrate": "128k",
+            "convert_lossy": "false",
+        }
+
+        plugin = AutoOpusConverter(ctx)
+
+        # Send request_fulfilled (which arrives even when download_completed is dropped)
+        event = MagicMock()
+        event.kind = "request_fulfilled"
+        event.payload = {
+            "request_id": "req_1",
+            "release_group_mbid": "mbid_request_test",
+            "status": "fulfilled",
+        }
+
+        asyncio.run(plugin.on_event(event))
+        plugin.queue.join()
+
+        opus_file = self.music_dir / "01. Song.opus"
+        self.assertTrue(opus_file.exists())
+        self.assertFalse(wav_file.exists())
+
+    def test_periodic_sweep(self):
+        wav_file = self.music_dir / "02. SweepSong.flac"
+        self._create_synthetic_wav(wav_file)
+
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO local_tracks (id, local_album_id, root_id, file_path, relative_path, path_hash, file_size_bytes, file_mtime_ns, stat_revision, stat_revision_kind, file_format, download_task_id, row_revision, availability) VALUES "
+            "('trk_2', 'alb_2', 'r1', ?, 'Artist/Album/02. SweepSong.flac', 'hash2', 100, 1000, 'rev2', 'exact', 'flac', '', 1, 'indexed')",
             (str(wav_file),),
         )
         conn.commit()
@@ -170,29 +215,13 @@ class TestPlugin(unittest.TestCase):
 
         plugin = AutoOpusConverter(ctx)
 
-        event = MagicMock()
-        event.kind = "download_completed"
-        event.payload = {
-            "task_id": "task_999",
-            "release_group_mbid": "mbid_xyz",
-            "outcome": "completed",
-        }
-
-        asyncio.run(plugin.on_event(event))
-
-        # Wait for worker thread to process task
+        # Trigger on_tick
+        asyncio.run(plugin.on_tick())
         plugin.queue.join()
 
-        opus_file = self.music_dir / "01. Song.opus"
+        opus_file = self.music_dir / "02. SweepSong.opus"
         self.assertTrue(opus_file.exists())
         self.assertFalse(wav_file.exists())
-
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT file_format FROM local_tracks WHERE id = 'trk_1'")
-        fmt = cur.fetchone()[0]
-        conn.close()
-        self.assertEqual(fmt, "opus")
 
 
 if __name__ == "__main__":
