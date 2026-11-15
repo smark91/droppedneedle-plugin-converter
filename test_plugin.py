@@ -20,6 +20,7 @@ from plugin import (
     find_unconverted_tracks_in_db,
     transcode_file,
     update_track_in_db,
+    __version__,
 )
 
 
@@ -105,6 +106,19 @@ class TestPlugin(unittest.TestCase):
             str(path),
         ]
         subprocess.run(cmd, check=True)
+
+    def test_version_consistency(self):
+        toml_path = Path(__file__).parent / "plugin.toml"
+        self.assertTrue(toml_path.exists())
+        version_line = [
+            line.strip()
+            for line in toml_path.read_text().splitlines()
+            if line.strip().startswith("version =")
+        ]
+        self.assertTrue(len(version_line) > 0)
+        toml_version = version_line[0].split("=")[1].strip().strip('"').strip("'")
+        self.assertEqual(__version__, toml_version)
+        self.assertEqual(__version__, "1.0.2")
 
     def test_calculate_path_hash(self):
         path = "Artist/Album/01. Track.opus"

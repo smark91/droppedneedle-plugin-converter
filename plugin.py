@@ -14,6 +14,8 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import List, Optional, Set, Tuple
 
+__version__ = "1.0.2"
+
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".aif", ".aiff"}
 LOSSY_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".wma"}
 
