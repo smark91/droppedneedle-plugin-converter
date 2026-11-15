@@ -139,7 +139,7 @@ class TestPlugin(unittest.TestCase):
         self.assertTrue(len(version_line) > 0)
         toml_version = version_line[0].split("=")[1].strip().strip('"').strip("'")
         self.assertEqual(__version__, toml_version)
-        self.assertEqual(__version__, "1.1.0")
+        self.assertEqual(__version__, "1.1.1")
 
     def test_calculate_path_hash(self):
         path = "Artist/Album/01. Track.opus"

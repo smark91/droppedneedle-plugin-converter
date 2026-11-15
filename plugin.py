@@ -14,7 +14,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import List, Optional, Set, Tuple
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".aif", ".aiff"}
 LOSSY_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".wma"}
@@ -89,8 +89,11 @@ def find_tracks_in_db(
         return []
 
     tracks: List[TrackRecord] = []
+    conn = None
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(db_path, timeout=15.0)
+        conn.execute("PRAGMA busy_timeout = 15000")
+        conn.execute("PRAGMA query_only = ON")
         cursor = conn.cursor()
 
         # 1. Match by download_task_id
@@ -130,10 +133,14 @@ def find_tracks_in_db(
                         row_revision=row[4],
                     )
                 )
-
-        conn.close()
     except Exception as err:
         logging.warning("Failed querying library.db at %s: %s", db_path, err)
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     return tracks
 
@@ -148,8 +155,11 @@ def find_unconverted_tracks_in_db(
         return []
 
     tracks: List[TrackRecord] = []
+    conn = None
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(db_path, timeout=15.0)
+        conn.execute("PRAGMA busy_timeout = 15000")
+        conn.execute("PRAGMA query_only = ON")
         cursor = conn.cursor()
 
         formats = ["flac", "wav", "alac", "aiff"]
@@ -178,9 +188,14 @@ def find_unconverted_tracks_in_db(
                     row_revision=row[4],
                 )
             )
-        conn.close()
     except Exception as err:
         logging.warning("Failed querying unconverted tracks from %s: %s", db_path, err)
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     return tracks
 
@@ -190,40 +205,72 @@ def update_track_in_db(
     track: TrackRecord,
     new_file_path: Path,
     new_relative_path: str,
+    max_retries: int = 3,
 ) -> bool:
-    """Update track path, hash, and stat revision in library.db to prevent catalog churn."""
+    """Update track path, hash, and stat revision in library.db using non-blocking IMMEDIATE transactions."""
     try:
         stat_result = new_file_path.stat()
         file_size = stat_result.st_size
         mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1e9))
         stat_rev = f"{file_size}:{mtime_ns}"
         path_hash = calculate_path_hash(new_relative_path)
-
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE local_tracks SET "
-            "file_path = ?, relative_path = ?, path_hash = ?, "
-            "file_size_bytes = ?, file_mtime_ns = ?, stat_revision = ?, "
-            "stat_revision_kind = 'exact', file_format = 'opus', "
-            "row_revision = row_revision + 1 "
-            "WHERE id = ?",
-            (
-                str(new_file_path),
-                new_relative_path,
-                path_hash,
-                file_size,
-                mtime_ns,
-                stat_rev,
-                track.track_id,
-            ),
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as err:
-        logging.error("Failed to update track %s in library.db: %s", track.track_id, err)
+    except OSError as err:
+        logging.error("Failed to stat transcoded file %s: %s", new_file_path, err)
         return False
+
+    for attempt in range(max_retries):
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=15.0, isolation_level=None)
+            conn.execute("PRAGMA busy_timeout = 15000")
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE local_tracks SET "
+                "file_path = ?, relative_path = ?, path_hash = ?, "
+                "file_size_bytes = ?, file_mtime_ns = ?, stat_revision = ?, "
+                "stat_revision_kind = 'exact', file_format = 'opus', "
+                "row_revision = row_revision + 1 "
+                "WHERE id = ?",
+                (
+                    str(new_file_path),
+                    new_relative_path,
+                    path_hash,
+                    file_size,
+                    mtime_ns,
+                    stat_rev,
+                    track.track_id,
+                ),
+            )
+            conn.execute("COMMIT")
+            return True
+        except sqlite3.OperationalError as err:
+            if conn:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+            if attempt < max_retries - 1 and ("locked" in str(err).lower() or "busy" in str(err).lower()):
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            logging.error("Failed to update track %s in library.db: %s", track.track_id, err)
+            return False
+        except Exception as err:
+            if conn:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+            logging.error("Failed to update track %s in library.db: %s", track.track_id, err)
+            return False
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    return False
 
 
 class AutoOpusConverter:
