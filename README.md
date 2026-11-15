@@ -1,59 +1,51 @@
-# DroppedNeedle Opus Conversion Pipeline
+# DroppedNeedle Auto Opus Converter Plugin
 
-An automated post-download transcode pipeline for Soulseek (`slskd`) downloads into DroppedNeedle's native Import Folder.
+A native DroppedNeedle v3 plugin that automatically converts newly landed FLAC downloads into Opus format directly inside your music library.
 
 ## Why this exists
 
-Soulseek distributions primarily offer FLAC or MP3. DroppedNeedle's internal pipeline lands downloaded files directly into the database-backed music library. If files are replaced or transcoded after landing, DroppedNeedle's database consistency checks treat the original tracks as missing and the new files as unregistered orphans, causing database churn and broken play history.
+In multi-user setups, non-admin users do not have access to underlying download clients like Soulseek (`slskd`). All search requests and downloads must be initiated through DroppedNeedle's web UI.
 
-This pipeline intercepts completed downloads at the source (in `slskd`), transcodes audio to Opus using FFmpeg while preserving metadata tags and album sidecars (covers, cue sheets), and atomically deposits the album into DroppedNeedle's monitored Import Folder (`/data/import`).
+Because Soulseek primarily hosts FLAC and MP3 files, this plugin listens for completed download events inside DroppedNeedle, converts the lossless files to Opus using the container's built-in FFmpeg, and updates the library catalog so track identities, album associations, and play history remain completely intact.
 
-DroppedNeedle's native `import_folder` engine then matches, tags, and files the Opus album cleanly on its first and only landing.
+## How it works
 
-## Features
+1. Any user searches for an album and clicks **Download** in DroppedNeedle's web UI.
+2. DroppedNeedle downloads the release via its configured `slskd` client and lands the files into the library (`/music`).
+3. DroppedNeedle emits the `download_completed` event.
+4. This plugin intercepts the event in under 50ms and queues it to an internal background worker.
+5. The worker locates the landed tracks via DroppedNeedle's database (`library.db`) or file match.
+6. The worker invokes `/usr/local/bin/ffmpeg` to transcode FLAC/WAV files to Opus at your configured bitrate (e.g. `160k`), preserving all tags and metadata (`-map_metadata 0`).
+7. The worker updates `local_tracks` in `library.db` with the new file format, path, and exact stat revision. DroppedNeedle never treats the tracks as missing or duplicate.
+8. The worker removes the source FLAC files.
 
-- **Lossless to Opus transcoding**: Converts FLAC, WAV, and ALAC to Opus via FFmpeg with `-map_metadata 0`.
-- **Lossy preservation**: Keeps existing MP3 and AAC files as-is by default to prevent generational loss.
-- **Sidecar copying**: Retains cover artwork (`.jpg`, `.png`), `.cue`, and `.log` files.
-- **Atomic delivery**: Builds albums inside a hidden `.staging_<album>` directory and performs an atomic rename once finished. DroppedNeedle never encounters partially written files.
-- **Zero external Python dependencies**: Standard library only.
+## Installation
 
-## Setup
+### Method 1. Install from GitHub (Recommended)
 
-### 1. In DroppedNeedle
+1. Push this repository to GitHub (or use your repository URL).
+2. In DroppedNeedle, navigate to **Settings > Plugins**.
+3. Paste the repository URL into the **Install a plugin** field and click **Preview**.
+4. Click **Install**.
+5. Enable the plugin on its card, adjust the settings if needed, and click **Save**.
 
-1. Navigate to **Settings > Acquisition > Import Folder**.
-2. Enable the Import Folder and set the path to your import mount (e.g. `/data/import`).
-3. DroppedNeedle will monitor this folder and ingest quiet albums automatically.
+### Method 2. Install by hand (Docker)
 
-### 2. In slskd (`slskd.yml`)
-
-Add the script integration to `slskd.yml`:
-
-```yaml
-integration:
-  scripts:
-    convert_to_opus:
-      on:
-        - DownloadDirectoryComplete
-      run:
-        executable: /usr/bin/python3
-        args: /scripts/convert.py
-        env:
-          DROPPEDNEEDLE_IMPORT_DIR: /import
-          OPUS_BITRATE: 160k
-          CONVERT_LOSSY: "false"
-          DELETE_SOURCE: "false"
-```
-
-### 3. Docker Volume Sharing
-
-Mount `convert.py` and a shared import folder between `slskd` and `droppedneedle` containers. See `docker-compose.yml.example` for a complete reference.
-
-## Standalone CLI Usage
-
-You can also run the script manually on any folder:
+Copy the plugin folder into DroppedNeedle's plugins volume:
 
 ```bash
-python3 convert.py "/path/to/downloaded/album" --import-dir "/data/import" --bitrate 160k
+cp -r . /path/to/droppedneedle/plugins/auto-opus-converter
 ```
+
+Then open **Settings > Plugins** in DroppedNeedle, enable the plugin, and click **Save**.
+
+## Plugin Settings
+
+- **Music Library Root (`library_path`)**: Root path of your music library (default: `/music`).
+- **Data Cache Path (`cache_path`)**: Path to DroppedNeedle's cache directory where `library.db` is stored (default: `/app/cache`).
+- **Target Opus Bitrate (`bitrate`)**: Desired bitrate for the Opus encoder (default: `160k`).
+- **Convert Lossy Formats (`convert_lossy`)**: Set to `true` if you also want to convert MP3/AAC files to Opus (default: `false`, keeping MP3s as-is to avoid generational audio quality loss).
+
+## Alternative: External slskd Script Hook
+
+If you run `slskd` as a standalone download tool without DroppedNeedle's download search UI, you can use the included [convert.py](convert.py) script with DroppedNeedle's Import Folder feature. See [slskd.yml.example](slskd.yml.example) and [docker-compose.yml.example](docker-compose.yml.example).

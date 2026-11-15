@@ -1,0 +1,29 @@
+[plugin]
+name = "auto-opus-converter"
+display_name = "Auto Opus Converter"
+version = "1.0.0"
+api_version = 2
+entrypoint = "plugin:AutoOpusConverter"
+capabilities = ["subscriber"]
+description = "Automatically converts newly downloaded FLAC files to Opus inside the library."
+author = "YourName"
+
+[[settings]]
+key = "library_path"
+label = "Music Library Root"
+help = "Root path of the music library inside the container (default: /music)."
+
+[[settings]]
+key = "cache_path"
+label = "Data Cache Path"
+help = "Path to DroppedNeedle cache directory containing library.db (default: /app/cache)."
+
+[[settings]]
+key = "bitrate"
+label = "Target Opus Bitrate"
+help = "Bitrate for Opus encoding, e.g. 160k, 192k (default: 160k)."
+
+[[settings]]
+key = "convert_lossy"
+label = "Convert Lossy Formats"
+help = "Set to true to also convert MP3/AAC files to Opus (default: false)."
