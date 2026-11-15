@@ -107,6 +107,26 @@ class TestPlugin(unittest.TestCase):
         ]
         subprocess.run(cmd, check=True)
 
+    def _create_flac_multichannel(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.5",
+            "-filter_complex",
+            "[0:a]channelmap=channel_layout=5.1(side):map=0|0|0|0|0|0[aout]",
+            "-map",
+            "[aout]",
+            str(path),
+        ]
+        subprocess.run(cmd, check=True)
+
     def test_version_consistency(self):
         toml_path = Path(__file__).parent / "plugin.toml"
         self.assertTrue(toml_path.exists())
@@ -118,7 +138,7 @@ class TestPlugin(unittest.TestCase):
         self.assertTrue(len(version_line) > 0)
         toml_version = version_line[0].split("=")[1].strip().strip('"').strip("'")
         self.assertEqual(__version__, toml_version)
-        self.assertEqual(__version__, "1.0.2")
+        self.assertEqual(__version__, "1.0.3")
 
     def test_calculate_path_hash(self):
         path = "Artist/Album/01. Track.opus"
@@ -139,6 +159,16 @@ class TestPlugin(unittest.TestCase):
         src = self.music_dir / "art.flac"
         dest = self.music_dir / "art.opus"
         self._create_flac_with_art(src)
+
+        ok = transcode_file(src, dest, "128k")
+        self.assertTrue(ok)
+        self.assertTrue(dest.exists())
+        self.assertGreater(dest.stat().st_size, 0)
+
+    def test_transcode_multichannel_5_1_side(self):
+        src = self.music_dir / "surround.flac"
+        dest = self.music_dir / "surround.opus"
+        self._create_flac_multichannel(src)
 
         ok = transcode_file(src, dest, "128k")
         self.assertTrue(ok)
