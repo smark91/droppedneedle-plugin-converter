@@ -1,11 +1,13 @@
 """DroppedNeedle v3 plugin to auto-convert downloaded FLAC tracks to Opus."""
 
+import base64
 import hashlib
 import json
 import logging
 import os
 import shutil
 import sqlite3
+import struct
 import subprocess
 import threading
 import time
@@ -14,7 +16,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import List, Optional, Set, Tuple
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".aif", ".aiff"}
 LOSSY_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".wma"}
@@ -34,10 +36,61 @@ def calculate_path_hash(relative_path: str) -> str:
     return hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
 
 
+def extract_flac_picture_block(source: Path) -> Optional[Tuple[bytes, str, bytes]]:
+    """Extract raw FLAC Block Type 6 (PICTURE) data, mime type, and image bytes."""
+    if source.suffix.lower() != ".flac" or not source.exists():
+        return None
+    try:
+        with open(source, "rb") as f:
+            if f.read(4) != b"fLaC":
+                return None
+            while True:
+                hdr = f.read(4)
+                if len(hdr) < 4:
+                    break
+                b0 = hdr[0]
+                is_last = (b0 & 0x80) != 0
+                btype = b0 & 0x7F
+                length = struct.unpack(">I", b"\x00" + hdr[1:4])[0]
+                if btype == 6:
+                    block_data = f.read(length)
+                    mime_len = struct.unpack(">I", block_data[4:8])[0]
+                    mime = block_data[8:8 + mime_len].decode("ascii", errors="ignore")
+                    idx = 8 + mime_len
+                    desc_len = struct.unpack(">I", block_data[idx:idx + 4])[0]
+                    idx += 4 + desc_len + 16
+                    img_len = struct.unpack(">I", block_data[idx:idx + 4])[0]
+                    img_bytes = block_data[idx + 4:idx + 4 + img_len]
+                    return block_data, mime, img_bytes
+                else:
+                    f.seek(length, 1)
+                if is_last:
+                    break
+    except Exception as err:
+        logging.debug("Could not extract picture from %s: %s", source, err)
+    return None
+
+
 def transcode_file(source: Path, target: Path, bitrate: str) -> bool:
-    """Transcode source audio to Opus using system FFmpeg with metadata preservation."""
+    """Transcode source audio to Opus preserving audio, tags, and album artwork."""
     temp_target = target.with_suffix(".tmp.opus")
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    pic_info = extract_flac_picture_block(source)
+    if pic_info:
+        block_data, mime, img_bytes = pic_info
+        # 1. Save cover file to album folder if no loose cover exists
+        ext = ".png" if "png" in mime.lower() else ".jpg"
+        cover_path = target.parent / f"cover{ext}"
+        has_cover = any(
+            (target.parent / name).exists()
+            for name in ("cover.jpg", "cover.png", "folder.jpg", "front.jpg")
+        )
+        if not has_cover:
+            try:
+                cover_path.write_bytes(img_bytes)
+            except OSError as err:
+                logging.debug("Could not write folder cover %s: %s", cover_path, err)
 
     cmd = [
         "ffmpeg",
@@ -60,10 +113,18 @@ def transcode_file(source: Path, target: Path, bitrate: str) -> bool:
         "on",
         "-map_metadata",
         "0",
+    ]
+
+    # 2. Embed picture as standard RFC 7845 Vorbis comment if within reasonable size (<= 1.2 MB)
+    if pic_info and len(pic_info[0]) <= 1_200_000:
+        b64_pic = base64.b64encode(pic_info[0]).decode("ascii")
+        cmd.extend(["-metadata", f"METADATA_BLOCK_PICTURE={b64_pic}"])
+
+    cmd.extend([
         "-f",
         "ogg",
         str(temp_target),
-    ]
+    ])
 
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:

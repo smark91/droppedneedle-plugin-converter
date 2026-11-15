@@ -1,7 +1,7 @@
 [plugin]
 name = "auto-opus-converter"
 display_name = "Auto Opus Converter"
-version = "1.1.1"
+version = "1.2.0"
 api_version = 2
 entrypoint = "plugin:AutoOpusConverter"
 capabilities = ["subscriber", "scheduler"]
