@@ -1,7 +1,7 @@
 [plugin]
 name = "auto-opus-converter"
 display_name = "Auto Opus Converter"
-version = "1.2.0"
+version = "1.3.0"
 api_version = 2
 entrypoint = "plugin:AutoOpusConverter"
 capabilities = ["subscriber", "scheduler"]
@@ -41,6 +41,11 @@ help = "Delete original lossless files after transcode (default: true). Set to f
 key = "enable_sweep"
 label = "Enable Periodic Sweep"
 help = "Periodically check library.db as a safety net for dropped download events (default: true)."
+
+[[settings]]
+key = "embed_art"
+label = "Embed Art in Tracks"
+help = "Embed cover art inside each Opus file (default: true). Set to false to save ~200 KB per track while keeping cover.jpg in the folder."
 
 [[settings]]
 key = "convert_lossy"

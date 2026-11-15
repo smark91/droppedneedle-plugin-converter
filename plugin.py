@@ -16,7 +16,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import List, Optional, Set, Tuple
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".aif", ".aiff"}
 LOSSY_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".wma"}
@@ -71,7 +71,9 @@ def extract_flac_picture_block(source: Path) -> Optional[Tuple[bytes, str, bytes
     return None
 
 
-def transcode_file(source: Path, target: Path, bitrate: str) -> bool:
+def transcode_file(
+    source: Path, target: Path, bitrate: str, embed_art: bool = True
+) -> bool:
     """Transcode source audio to Opus preserving audio, tags, and album artwork."""
     temp_target = target.with_suffix(".tmp.opus")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -115,8 +117,8 @@ def transcode_file(source: Path, target: Path, bitrate: str) -> bool:
         "0",
     ]
 
-    # 2. Embed picture as standard RFC 7845 Vorbis comment if within reasonable size (<= 1.2 MB)
-    if pic_info and len(pic_info[0]) <= 1_200_000:
+    # 2. Embed picture as standard RFC 7845 Vorbis comment if enabled and within reasonable size (<= 1.2 MB)
+    if embed_art and pic_info and len(pic_info[0]) <= 1_200_000:
         b64_pic = base64.b64encode(pic_info[0]).decode("ascii")
         cmd.extend(["-metadata", f"METADATA_BLOCK_PICTURE={b64_pic}"])
 
@@ -427,6 +429,7 @@ class AutoOpusConverter:
         self, tracks: List[TrackRecord], db_path: Path, bitrate: str, convert_lossy: bool
     ) -> None:
         delete_source = str(self.ctx.settings.get("delete_source", "true")).lower() not in ("false", "0", "no")
+        embed_art = str(self.ctx.settings.get("embed_art", "true")).lower() not in ("false", "0", "no")
 
         for track in tracks:
             src = track.file_path
@@ -439,8 +442,8 @@ class AutoOpusConverter:
             dest = src.with_suffix(".opus")
             rel_dest = str(Path(track.relative_path).with_suffix(".opus"))
 
-            self.ctx.logger.info("Transcoding %s -> %s", src.name, dest.name)
-            if transcode_file(src, dest, bitrate):
+            self.ctx.logger.info("Transcoding %s -> %s (embed_art=%s)", src.name, dest.name, embed_art)
+            if transcode_file(src, dest, bitrate, embed_art=embed_art):
                 db_updated = False
                 if db_path.exists():
                     db_updated = update_track_in_db(db_path, track, dest, rel_dest)

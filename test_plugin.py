@@ -139,7 +139,7 @@ class TestPlugin(unittest.TestCase):
         self.assertTrue(len(version_line) > 0)
         toml_version = version_line[0].split("=")[1].strip().strip('"').strip("'")
         self.assertEqual(__version__, toml_version)
-        self.assertEqual(__version__, "1.2.0")
+        self.assertEqual(__version__, "1.3.0")
 
     def test_calculate_path_hash(self):
         path = "Artist/Album/01. Track.opus"
@@ -174,6 +174,25 @@ class TestPlugin(unittest.TestCase):
         # Artwork was also embedded as RFC 7845 METADATA_BLOCK_PICTURE
         probe = subprocess.run(["ffmpeg", "-i", str(dest)], capture_output=True, text=True)
         self.assertIn("attached pic", probe.stderr)
+
+    def test_transcode_flac_with_attached_picture_disabled_embed_art(self):
+        album_dir = self.music_dir / "NoEmbedAlbum"
+        album_dir.mkdir(parents=True)
+        src = album_dir / "art2.flac"
+        dest = album_dir / "art2.opus"
+        self._create_flac_with_art(src)
+
+        ok = transcode_file(src, dest, "128k", embed_art=False)
+        self.assertTrue(ok)
+        self.assertTrue(dest.exists())
+
+        # Folder cover image was written
+        cover_file = dest.parent / "cover.png"
+        self.assertTrue(cover_file.exists())
+
+        # But artwork was NOT embedded into Opus
+        probe = subprocess.run(["ffmpeg", "-i", str(dest)], capture_output=True, text=True)
+        self.assertNotIn("attached pic", probe.stderr)
 
     def test_transcode_multichannel_5_1_side(self):
         src = self.music_dir / "surround.flac"

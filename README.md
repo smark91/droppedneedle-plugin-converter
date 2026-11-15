@@ -47,6 +47,7 @@ Then open **Settings > Plugins** in DroppedNeedle, enable the plugin, and click 
 - **Convert Pre-existing Files (`convert_existing`)**: When `false` (default), only newly downloaded releases are converted. Older library files remain untouched. Set to `true` to sweep and convert older lossless files.
 - **Delete Original Files (`delete_source`)**: When `true` (default), source lossless files are deleted after successful conversion. Set to `false` to keep original files on disk alongside Opus.
 - **Enable Periodic Sweep (`enable_sweep`)**: Periodically check `library.db` every 5 minutes as a safety net for any dropped download events (default: `true`).
+- **Embed Art in Tracks (`embed_art`)**: When `true` (default), embeds the album cover inside each Opus file using RFC 7845 metadata. Set to `false` to keep individual files pure audio and save ~200 KB per track, while still writing `cover.jpg` once to the album directory.
 - **Convert Lossy Formats (`convert_lossy`)**: Set to `true` if you also want to convert MP3/AAC files to Opus (default: `false`, keeping MP3s as-is to avoid generational audio quality loss).
 
 
