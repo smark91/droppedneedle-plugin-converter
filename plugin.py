@@ -14,7 +14,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import List, Optional, Set, Tuple
 
-__version__ = "1.0.3"
+__version__ = "1.1.0"
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".aif", ".aiff"}
 LOSSY_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".wma"}
@@ -138,7 +138,11 @@ def find_tracks_in_db(
     return tracks
 
 
-def find_unconverted_tracks_in_db(db_path: Path, convert_lossy: bool) -> List[TrackRecord]:
+def find_unconverted_tracks_in_db(
+    db_path: Path,
+    convert_lossy: bool,
+    since_imported_at_ms: Optional[int] = None,
+) -> List[TrackRecord]:
     """Find any remaining unconverted lossless (or lossy) tracks in library.db."""
     if not db_path.exists():
         return []
@@ -158,7 +162,12 @@ def find_unconverted_tracks_in_db(db_path: Path, convert_lossy: bool) -> List[Tr
             f"FROM local_tracks WHERE lower(file_format) IN ({placeholders}) "
             f"AND availability = 'indexed'"
         )
-        cursor.execute(query, formats)
+        params: list = list(formats)
+        if since_imported_at_ms is not None:
+            query += " AND imported_at >= ?"
+            params.append(since_imported_at_ms)
+
+        cursor.execute(query, params)
         for row in cursor.fetchall():
             tracks.append(
                 TrackRecord(
@@ -222,6 +231,7 @@ class AutoOpusConverter:
 
     def __init__(self, context):
         self.ctx = context
+        self.started_at_ms = int(time.time() * 1000)
         self.queue: Queue = Queue()
         self.worker = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker.start()
@@ -251,7 +261,9 @@ class AutoOpusConverter:
 
     async def on_tick(self) -> None:
         """Periodic safety net to catch any unconverted tracks whose events were dropped."""
-        self.queue.put(("__sweep__", ""))
+        enable_sweep = str(self.ctx.settings.get("enable_sweep", "true")).lower() not in ("false", "0", "no")
+        if enable_sweep:
+            self.queue.put(("__sweep__", ""))
 
     def _worker_loop(self) -> None:
         """Process queued conversion tasks sequentially in background."""
@@ -272,13 +284,15 @@ class AutoOpusConverter:
                 self.queue.task_done()
 
     def _process_sweep(self) -> None:
-        """Sweep library.db and transcode any unconverted files."""
+        """Sweep library.db and transcode unconverted files."""
         cache_path = Path(self.ctx.settings.get("cache_path") or "/app/cache")
         db_path = cache_path / "library.db"
         bitrate = self.ctx.settings.get("bitrate") or "160k"
         convert_lossy = str(self.ctx.settings.get("convert_lossy", "")).lower() in ("true", "1", "yes")
+        convert_existing = str(self.ctx.settings.get("convert_existing", "")).lower() in ("true", "1", "yes")
 
-        tracks = find_unconverted_tracks_in_db(db_path, convert_lossy)
+        since_ms = None if convert_existing else self.started_at_ms
+        tracks = find_unconverted_tracks_in_db(db_path, convert_lossy, since_imported_at_ms=since_ms)
         if tracks:
             self.ctx.logger.info("Periodic sweep found %d unconverted track(s)", len(tracks))
             self._convert_tracks(tracks, db_path, bitrate, convert_lossy)
@@ -304,6 +318,8 @@ class AutoOpusConverter:
     def _convert_tracks(
         self, tracks: List[TrackRecord], db_path: Path, bitrate: str, convert_lossy: bool
     ) -> None:
+        delete_source = str(self.ctx.settings.get("delete_source", "true")).lower() not in ("false", "0", "no")
+
         for track in tracks:
             src = track.file_path
             suffix = src.suffix.lower()
@@ -321,11 +337,15 @@ class AutoOpusConverter:
                 if db_path.exists():
                     db_updated = update_track_in_db(db_path, track, dest, rel_dest)
 
-                try:
-                    src.unlink()
-                except OSError as err:
-                    self.ctx.logger.warning("Could not delete original file %s: %s", src, err)
+                if delete_source:
+                    try:
+                        src.unlink()
+                    except OSError as err:
+                        self.ctx.logger.warning("Could not delete original file %s: %s", src, err)
 
                 self.ctx.logger.info(
-                    "Transcoded %s successfully (db updated: %s)", dest.name, db_updated
+                    "Transcoded %s successfully (db updated: %s, deleted original: %s)",
+                    dest.name,
+                    db_updated,
+                    delete_source,
                 )

@@ -57,7 +57,8 @@ class TestPlugin(unittest.TestCase):
                 file_format TEXT,
                 download_task_id TEXT,
                 row_revision INTEGER,
-                availability TEXT DEFAULT 'indexed'
+                availability TEXT DEFAULT 'indexed',
+                imported_at INTEGER DEFAULT 0
             )
             """
         )
@@ -138,7 +139,7 @@ class TestPlugin(unittest.TestCase):
         self.assertTrue(len(version_line) > 0)
         toml_version = version_line[0].split("=")[1].strip().strip('"').strip("'")
         self.assertEqual(__version__, toml_version)
-        self.assertEqual(__version__, "1.0.3")
+        self.assertEqual(__version__, "1.1.0")
 
     def test_calculate_path_hash(self):
         path = "Artist/Album/01. Track.opus"
@@ -268,11 +269,114 @@ class TestPlugin(unittest.TestCase):
         wav_file = self.music_dir / "02. SweepSong.flac"
         self._create_synthetic_wav(wav_file)
 
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO local_tracks (id, local_album_id, root_id, file_path, relative_path, path_hash, file_size_bytes, file_mtime_ns, stat_revision, stat_revision_kind, file_format, download_task_id, row_revision, availability, imported_at) VALUES "
+            "('trk_2', 'alb_2', 'r1', ?, 'Artist/Album/02. SweepSong.flac', 'hash2', 100, 1000, 'rev2', 'exact', 'flac', '', 1, 'indexed', ?)",
+            (str(wav_file), now_ms + 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        ctx = MagicMock()
+        ctx.logger = logging.getLogger("test_plugin")
+        ctx.settings = {
+            "cache_path": str(self.cache_dir),
+            "bitrate": "128k",
+            "convert_lossy": "false",
+            "convert_existing": "false",
+        }
+
+        plugin = AutoOpusConverter(ctx)
+
+        # Trigger on_tick - newly imported track is caught
+        asyncio.run(plugin.on_tick())
+        plugin.queue.join()
+
+        opus_file = self.music_dir / "02. SweepSong.opus"
+        self.assertTrue(opus_file.exists())
+        self.assertFalse(wav_file.exists())
+
+    def test_periodic_sweep_ignores_old_files_by_default(self):
+        wav_file = self.music_dir / "03. OldSong.flac"
+        self._create_synthetic_wav(wav_file)
+
+        # imported_at is well before plugin starts
+        old_imported_ms = 1000
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO local_tracks (id, local_album_id, root_id, file_path, relative_path, path_hash, file_size_bytes, file_mtime_ns, stat_revision, stat_revision_kind, file_format, download_task_id, row_revision, availability, imported_at) VALUES "
+            "('trk_old', 'alb_old', 'r1', ?, 'Artist/Album/03. OldSong.flac', 'hash_old', 100, 1000, 'rev_old', 'exact', 'flac', '', 1, 'indexed', ?)",
+            (str(wav_file), old_imported_ms),
+        )
+        conn.commit()
+        conn.close()
+
+        ctx = MagicMock()
+        ctx.logger = logging.getLogger("test_plugin")
+        ctx.settings = {
+            "cache_path": str(self.cache_dir),
+            "bitrate": "128k",
+            "convert_lossy": "false",
+            "convert_existing": "false",
+        }
+
+        plugin = AutoOpusConverter(ctx)
+
+        asyncio.run(plugin.on_tick())
+        plugin.queue.join()
+
+        opus_file = self.music_dir / "03. OldSong.opus"
+        # Old file was NOT converted
+        self.assertFalse(opus_file.exists())
+        self.assertTrue(wav_file.exists())
+
+    def test_periodic_sweep_converts_old_files_when_enabled(self):
+        wav_file = self.music_dir / "04. OldConvertedSong.flac"
+        self._create_synthetic_wav(wav_file)
+
+        old_imported_ms = 1000
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO local_tracks (id, local_album_id, root_id, file_path, relative_path, path_hash, file_size_bytes, file_mtime_ns, stat_revision, stat_revision_kind, file_format, download_task_id, row_revision, availability, imported_at) VALUES "
+            "('trk_old_conv', 'alb_old', 'r1', ?, 'Artist/Album/04. OldConvertedSong.flac', 'hash_old2', 100, 1000, 'rev_old2', 'exact', 'flac', '', 1, 'indexed', ?)",
+            (str(wav_file), old_imported_ms),
+        )
+        conn.commit()
+        conn.close()
+
+        ctx = MagicMock()
+        ctx.logger = logging.getLogger("test_plugin")
+        ctx.settings = {
+            "cache_path": str(self.cache_dir),
+            "bitrate": "128k",
+            "convert_lossy": "false",
+            "convert_existing": "true",
+        }
+
+        plugin = AutoOpusConverter(ctx)
+
+        asyncio.run(plugin.on_tick())
+        plugin.queue.join()
+
+        opus_file = self.music_dir / "04. OldConvertedSong.opus"
+        # Old file was converted because convert_existing=true
+        self.assertTrue(opus_file.exists())
+        self.assertFalse(wav_file.exists())
+
+    def test_delete_source_false_keeps_original(self):
+        wav_file = self.music_dir / "05. RetainSource.flac"
+        self._create_synthetic_wav(wav_file)
+
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO local_tracks (id, local_album_id, root_id, file_path, relative_path, path_hash, file_size_bytes, file_mtime_ns, stat_revision, stat_revision_kind, file_format, download_task_id, row_revision, availability) VALUES "
-            "('trk_2', 'alb_2', 'r1', ?, 'Artist/Album/02. SweepSong.flac', 'hash2', 100, 1000, 'rev2', 'exact', 'flac', '', 1, 'indexed')",
+            "('trk_retain', 'alb_retain', 'r1', ?, 'Artist/Album/05. RetainSource.flac', 'hash_ret', 100, 1000, 'rev_ret', 'exact', 'flac', 'task_retain', 1, 'indexed')",
             (str(wav_file),),
         )
         conn.commit()
@@ -284,17 +388,36 @@ class TestPlugin(unittest.TestCase):
             "cache_path": str(self.cache_dir),
             "bitrate": "128k",
             "convert_lossy": "false",
+            "delete_source": "false",
         }
 
         plugin = AutoOpusConverter(ctx)
 
-        # Trigger on_tick
-        asyncio.run(plugin.on_tick())
+        event = MagicMock()
+        event.kind = "download_completed"
+        event.payload = {"task_id": "task_retain", "outcome": "completed"}
+
+        asyncio.run(plugin.on_event(event))
         plugin.queue.join()
 
-        opus_file = self.music_dir / "02. SweepSong.opus"
+        opus_file = self.music_dir / "05. RetainSource.opus"
         self.assertTrue(opus_file.exists())
-        self.assertFalse(wav_file.exists())
+        # Original file was KEPT because delete_source=false
+        self.assertTrue(wav_file.exists())
+
+    def test_enable_sweep_disabled(self):
+        ctx = MagicMock()
+        ctx.logger = logging.getLogger("test_plugin")
+        ctx.settings = {
+            "enable_sweep": "false",
+        }
+
+        plugin = AutoOpusConverter(ctx)
+        self.assertEqual(plugin.queue.qsize(), 0)
+
+        asyncio.run(plugin.on_tick())
+        # Nothing added to queue because sweep is disabled
+        self.assertEqual(plugin.queue.qsize(), 0)
 
 
 if __name__ == "__main__":

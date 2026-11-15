@@ -1,7 +1,7 @@
 [plugin]
 name = "auto-opus-converter"
 display_name = "Auto Opus Converter"
-version = "1.0.3"
+version = "1.1.0"
 api_version = 2
 entrypoint = "plugin:AutoOpusConverter"
 capabilities = ["subscriber", "scheduler"]
@@ -26,6 +26,21 @@ help = "Path to DroppedNeedle cache directory containing library.db (default: /a
 key = "bitrate"
 label = "Target Opus Bitrate"
 help = "Bitrate for Opus encoding, e.g. 160k, 192k (default: 160k)."
+
+[[settings]]
+key = "convert_existing"
+label = "Convert Pre-existing Files"
+help = "Set to true to scan and convert existing files in library.db. If false, only new downloads are converted (default: false)."
+
+[[settings]]
+key = "delete_source"
+label = "Delete Original Files"
+help = "Delete original lossless files after transcode (default: true). Set to false to keep original files alongside Opus."
+
+[[settings]]
+key = "enable_sweep"
+label = "Enable Periodic Sweep"
+help = "Periodically check library.db as a safety net for dropped download events (default: true)."
 
 [[settings]]
 key = "convert_lossy"

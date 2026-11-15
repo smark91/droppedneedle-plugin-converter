@@ -44,6 +44,9 @@ Then open **Settings > Plugins** in DroppedNeedle, enable the plugin, and click 
 - **Music Library Root (`library_path`)**: Root path of your music library (default: `/music`).
 - **Data Cache Path (`cache_path`)**: Path to DroppedNeedle's cache directory where `library.db` is stored (default: `/app/cache`).
 - **Target Opus Bitrate (`bitrate`)**: Desired bitrate for the Opus encoder (default: `160k`).
+- **Convert Pre-existing Files (`convert_existing`)**: When `false` (default), only newly downloaded releases are converted. Older library files remain untouched. Set to `true` to sweep and convert older lossless files.
+- **Delete Original Files (`delete_source`)**: When `true` (default), source lossless files are deleted after successful conversion. Set to `false` to keep original files on disk alongside Opus.
+- **Enable Periodic Sweep (`enable_sweep`)**: Periodically check `library.db` every 5 minutes as a safety net for any dropped download events (default: `true`).
 - **Convert Lossy Formats (`convert_lossy`)**: Set to `true` if you also want to convert MP3/AAC files to Opus (default: `false`, keeping MP3s as-is to avoid generational audio quality loss).
 
 
