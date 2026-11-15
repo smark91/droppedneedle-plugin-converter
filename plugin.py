@@ -45,6 +45,9 @@ def transcode_file(source: Path, target: Path, bitrate: str) -> bool:
         "error",
         "-i",
         str(source),
+        "-vn",
+        "-map",
+        "0:a:0",
         "-c:a",
         "libopus",
         "-b:a",
@@ -53,18 +56,25 @@ def transcode_file(source: Path, target: Path, bitrate: str) -> bool:
         "on",
         "-map_metadata",
         "0",
+        "-f",
+        "ogg",
         str(temp_target),
     ]
 
-    try:
-        subprocess.run(cmd, check=True)
-        temp_target.replace(target)
-        return True
-    except subprocess.CalledProcessError as err:
-        logging.error("FFmpeg error transcoding %s: %s", source, err)
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        logging.error(
+            "FFmpeg error transcoding %s (exit %d): %s",
+            source,
+            res.returncode,
+            res.stderr.strip(),
+        )
         if temp_target.exists():
             temp_target.unlink()
         return False
+
+    temp_target.replace(target)
+    return True
 
 
 def find_tracks_in_db(

@@ -87,6 +87,25 @@ class TestPlugin(unittest.TestCase):
         ]
         subprocess.run(cmd, check=True)
 
+    def _create_flac_with_art(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        wav_path = self.test_dir / "temp_audio.wav"
+        img_path = self.test_dir / "temp_art.png"
+        self._create_synthetic_wav(wav_path)
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=100x100:d=1", "-vframes", "1", str(img_path)],
+            check=True,
+        )
+        cmd = [
+            "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+            "-i", str(wav_path), "-i", str(img_path),
+            "-map", "0:a", "-map", "1:v",
+            "-c:a", "flac", "-c:v", "copy",
+            "-disposition:v", "attached_pic",
+            str(path),
+        ]
+        subprocess.run(cmd, check=True)
+
     def test_calculate_path_hash(self):
         path = "Artist/Album/01. Track.opus"
         expected = hashlib.sha256(path.encode("utf-8")).hexdigest()
@@ -96,6 +115,16 @@ class TestPlugin(unittest.TestCase):
         src = self.music_dir / "test.wav"
         dest = self.music_dir / "test.opus"
         self._create_synthetic_wav(src)
+
+        ok = transcode_file(src, dest, "128k")
+        self.assertTrue(ok)
+        self.assertTrue(dest.exists())
+        self.assertGreater(dest.stat().st_size, 0)
+
+    def test_transcode_flac_with_attached_picture(self):
+        src = self.music_dir / "art.flac"
+        dest = self.music_dir / "art.opus"
+        self._create_flac_with_art(src)
 
         ok = transcode_file(src, dest, "128k")
         self.assertTrue(ok)
