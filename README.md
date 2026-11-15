@@ -46,6 +46,4 @@ Then open **Settings > Plugins** in DroppedNeedle, enable the plugin, and click 
 - **Target Opus Bitrate (`bitrate`)**: Desired bitrate for the Opus encoder (default: `160k`).
 - **Convert Lossy Formats (`convert_lossy`)**: Set to `true` if you also want to convert MP3/AAC files to Opus (default: `false`, keeping MP3s as-is to avoid generational audio quality loss).
 
-## Alternative: External slskd Script Hook
 
-If you run `slskd` as a standalone download tool without DroppedNeedle's download search UI, you can use the included [convert.py](convert.py) script with DroppedNeedle's Import Folder feature. See [slskd.yml.example](slskd.yml.example) and [docker-compose.yml.example](docker-compose.yml.example).
