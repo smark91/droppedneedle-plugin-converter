@@ -2,10 +2,8 @@
 
 import base64
 import hashlib
-import json
 import logging
 import os
-import shutil
 import sqlite3
 import struct
 import subprocess
@@ -14,9 +12,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
-__version__ = "1.3.0"
+__version__ = "0.1.0"
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".aif", ".aiff"}
 LOSSY_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".wma"}
@@ -27,8 +25,6 @@ class TrackRecord:
     track_id: str
     file_path: Path
     relative_path: str
-    root_id: str
-    row_revision: int
 
 
 def calculate_path_hash(relative_path: str) -> str:
@@ -36,8 +32,11 @@ def calculate_path_hash(relative_path: str) -> str:
     return hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
 
 
-def extract_flac_picture_block(source: Path) -> Optional[Tuple[bytes, str, bytes]]:
+def extract_flac_picture_block(
+    source: Path, logger: Optional[logging.Logger] = None
+) -> Optional[Tuple[bytes, str, bytes]]:
     """Extract raw FLAC Block Type 6 (PICTURE) data, mime type, and image bytes."""
+    log = logger or logging.getLogger("droppedneedle-plugin-converter")
     if source.suffix.lower() != ".flac" or not source.exists():
         return None
     try:
@@ -67,18 +66,23 @@ def extract_flac_picture_block(source: Path) -> Optional[Tuple[bytes, str, bytes
                 if is_last:
                     break
     except Exception as err:
-        logging.debug("Could not extract picture from %s: %s", source, err)
+        log.debug("Could not extract picture from %s: %s", source, err)
     return None
 
 
 def transcode_file(
-    source: Path, target: Path, bitrate: str, embed_art: bool = True
+    source: Path,
+    target: Path,
+    bitrate: str,
+    embed_art: bool = True,
+    logger: Optional[logging.Logger] = None,
 ) -> bool:
     """Transcode source audio to Opus preserving audio, tags, and album artwork."""
+    log = logger or logging.getLogger("droppedneedle-plugin-converter")
     temp_target = target.with_suffix(".tmp.opus")
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    pic_info = extract_flac_picture_block(source)
+    pic_info = extract_flac_picture_block(source, logger=log)
     if pic_info:
         block_data, mime, img_bytes = pic_info
         # 1. Save cover file to album folder if no loose cover exists
@@ -92,7 +96,7 @@ def transcode_file(
             try:
                 cover_path.write_bytes(img_bytes)
             except OSError as err:
-                logging.debug("Could not write folder cover %s: %s", cover_path, err)
+                log.debug("Could not write folder cover %s: %s", cover_path, err)
 
     cmd = [
         "ffmpeg",
@@ -117,8 +121,8 @@ def transcode_file(
         "0",
     ]
 
-    # 2. Embed picture as standard RFC 7845 Vorbis comment if enabled and within reasonable size (<= 1.2 MB)
-    if embed_art and pic_info and len(pic_info[0]) <= 1_200_000:
+    # 2. Embed picture as standard RFC 7845 Vorbis comment if enabled and fits Linux MAX_ARG_STRLEN (<= 90 KB)
+    if embed_art and pic_info and len(pic_info[0]) <= 90_000:
         b64_pic = base64.b64encode(pic_info[0]).decode("ascii")
         cmd.extend(["-metadata", f"METADATA_BLOCK_PICTURE={b64_pic}"])
 
@@ -128,16 +132,29 @@ def transcode_file(
         str(temp_target),
     ])
 
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as err:
+        log.error("FFmpeg execution failed for %s: %s", source, err)
+        if temp_target.exists():
+            try:
+                temp_target.unlink()
+            except OSError:
+                pass
+        return False
+
     if res.returncode != 0:
-        logging.error(
+        log.error(
             "FFmpeg error transcoding %s (exit %d): %s",
             source,
             res.returncode,
             res.stderr.strip(),
         )
         if temp_target.exists():
-            temp_target.unlink()
+            try:
+                temp_target.unlink()
+            except OSError:
+                pass
         return False
 
     temp_target.replace(target)
@@ -145,12 +162,17 @@ def transcode_file(
 
 
 def find_tracks_in_db(
-    db_path: Path, task_id: Optional[str], release_group_mbid: Optional[str]
+    db_path: Path,
+    task_id: Optional[str],
+    release_group_mbid: Optional[str],
+    since_imported_at_ms: Optional[int] = None,
+    logger: Optional[logging.Logger] = None,
 ) -> List[TrackRecord]:
     """Find track paths and identifiers in DroppedNeedle's library.db."""
     if not db_path.exists():
         return []
 
+    log = logger or logging.getLogger("droppedneedle-plugin-converter")
     tracks: List[TrackRecord] = []
     conn = None
     try:
@@ -162,7 +184,7 @@ def find_tracks_in_db(
         # 1. Match by download_task_id
         if task_id and task_id != "__sweep__":
             cursor.execute(
-                "SELECT id, file_path, relative_path, root_id, row_revision "
+                "SELECT id, file_path, relative_path "
                 "FROM local_tracks WHERE download_task_id = ?",
                 (task_id,),
             )
@@ -172,32 +194,32 @@ def find_tracks_in_db(
                         track_id=row[0],
                         file_path=Path(row[1]),
                         relative_path=row[2],
-                        root_id=row[3],
-                        row_revision=row[4],
                     )
                 )
 
         # 2. Match by release_group_mbid
         if not tracks and release_group_mbid:
-            cursor.execute(
-                "SELECT t.id, t.file_path, t.relative_path, t.root_id, t.row_revision "
+            query = (
+                "SELECT t.id, t.file_path, t.relative_path "
                 "FROM local_tracks t "
                 "JOIN local_album_external_identities i ON t.local_album_id = i.local_album_id "
-                "WHERE lower(i.release_group_mbid) = lower(?)",
-                (release_group_mbid,),
+                "WHERE lower(i.release_group_mbid) = lower(?) AND t.availability = 'indexed'"
             )
+            params: list = [release_group_mbid]
+            if since_imported_at_ms is not None:
+                query += " AND t.imported_at >= ?"
+                params.append(since_imported_at_ms)
+            cursor.execute(query, params)
             for row in cursor.fetchall():
                 tracks.append(
                     TrackRecord(
                         track_id=row[0],
                         file_path=Path(row[1]),
                         relative_path=row[2],
-                        root_id=row[3],
-                        row_revision=row[4],
                     )
                 )
     except Exception as err:
-        logging.warning("Failed querying library.db at %s: %s", db_path, err)
+        log.warning("Failed querying library.db at %s: %s", db_path, err)
     finally:
         if conn:
             try:
@@ -212,11 +234,14 @@ def find_unconverted_tracks_in_db(
     db_path: Path,
     convert_lossy: bool,
     since_imported_at_ms: Optional[int] = None,
+    limit: int = 100,
+    logger: Optional[logging.Logger] = None,
 ) -> List[TrackRecord]:
     """Find any remaining unconverted lossless (or lossy) tracks in library.db."""
     if not db_path.exists():
         return []
 
+    log = logger or logging.getLogger("droppedneedle-plugin-converter")
     tracks: List[TrackRecord] = []
     conn = None
     try:
@@ -225,13 +250,13 @@ def find_unconverted_tracks_in_db(
         conn.execute("PRAGMA query_only = ON")
         cursor = conn.cursor()
 
-        formats = ["flac", "wav", "alac", "aiff"]
+        formats = ["flac", "wav", "alac", "aif", "aiff"]
         if convert_lossy:
             formats.extend(["mp3", "m4a", "aac", "ogg", "wma"])
 
         placeholders = ",".join("?" for _ in formats)
         query = (
-            f"SELECT id, file_path, relative_path, root_id, row_revision "
+            f"SELECT id, file_path, relative_path "
             f"FROM local_tracks WHERE lower(file_format) IN ({placeholders}) "
             f"AND availability = 'indexed'"
         )
@@ -240,6 +265,9 @@ def find_unconverted_tracks_in_db(
             query += " AND imported_at >= ?"
             params.append(since_imported_at_ms)
 
+        query += " LIMIT ?"
+        params.append(limit)
+
         cursor.execute(query, params)
         for row in cursor.fetchall():
             tracks.append(
@@ -247,12 +275,10 @@ def find_unconverted_tracks_in_db(
                     track_id=row[0],
                     file_path=Path(row[1]),
                     relative_path=row[2],
-                    root_id=row[3],
-                    row_revision=row[4],
                 )
             )
     except Exception as err:
-        logging.warning("Failed querying unconverted tracks from %s: %s", db_path, err)
+        log.warning("Failed querying unconverted tracks from %s: %s", db_path, err)
     finally:
         if conn:
             try:
@@ -269,8 +295,10 @@ def update_track_in_db(
     new_file_path: Path,
     new_relative_path: str,
     max_retries: int = 3,
+    logger: Optional[logging.Logger] = None,
 ) -> bool:
     """Update track path, hash, and stat revision in library.db using non-blocking IMMEDIATE transactions."""
+    log = logger or logging.getLogger("droppedneedle-plugin-converter")
     try:
         stat_result = new_file_path.stat()
         file_size = stat_result.st_size
@@ -278,7 +306,7 @@ def update_track_in_db(
         stat_rev = f"{file_size}:{mtime_ns}"
         path_hash = calculate_path_hash(new_relative_path)
     except OSError as err:
-        logging.error("Failed to stat transcoded file %s: %s", new_file_path, err)
+        log.error("Failed to stat transcoded file %s: %s", new_file_path, err)
         return False
 
     for attempt in range(max_retries):
@@ -305,6 +333,10 @@ def update_track_in_db(
                     track.track_id,
                 ),
             )
+            if cursor.rowcount == 0:
+                conn.execute("ROLLBACK")
+                log.warning("Track %s not found in local_tracks to update", track.track_id)
+                return False
             conn.execute("COMMIT")
             return True
         except sqlite3.OperationalError as err:
@@ -316,7 +348,7 @@ def update_track_in_db(
             if attempt < max_retries - 1 and ("locked" in str(err).lower() or "busy" in str(err).lower()):
                 time.sleep(0.5 * (attempt + 1))
                 continue
-            logging.error("Failed to update track %s in library.db: %s", track.track_id, err)
+            log.error("Failed to update track %s in library.db: %s", track.track_id, err)
             return False
         except Exception as err:
             if conn:
@@ -324,7 +356,7 @@ def update_track_in_db(
                     conn.execute("ROLLBACK")
                 except Exception:
                     pass
-            logging.error("Failed to update track %s in library.db: %s", track.track_id, err)
+            log.error("Failed to update track %s in library.db: %s", track.track_id, err)
             return False
         finally:
             if conn:
@@ -372,7 +404,7 @@ class AutoOpusConverter:
     async def on_tick(self) -> None:
         """Periodic safety net to catch any unconverted tracks whose events were dropped."""
         enable_sweep = str(self.ctx.settings.get("enable_sweep", "true")).lower() not in ("false", "0", "no")
-        if enable_sweep:
+        if enable_sweep and ("__sweep__", "") not in self.queue.queue:
             self.queue.put(("__sweep__", ""))
 
     def _worker_loop(self) -> None:
@@ -402,7 +434,9 @@ class AutoOpusConverter:
         convert_existing = str(self.ctx.settings.get("convert_existing", "")).lower() in ("true", "1", "yes")
 
         since_ms = None if convert_existing else self.started_at_ms
-        tracks = find_unconverted_tracks_in_db(db_path, convert_lossy, since_imported_at_ms=since_ms)
+        tracks = find_unconverted_tracks_in_db(
+            db_path, convert_lossy, since_imported_at_ms=since_ms, logger=self.ctx.logger
+        )
         if tracks:
             self.ctx.logger.info("Periodic sweep found %d unconverted track(s)", len(tracks))
             self._convert_tracks(tracks, db_path, bitrate, convert_lossy)
@@ -412,12 +446,18 @@ class AutoOpusConverter:
         db_path = cache_path / "library.db"
         bitrate = self.ctx.settings.get("bitrate") or "160k"
         convert_lossy = str(self.ctx.settings.get("convert_lossy", "")).lower() in ("true", "1", "yes")
+        convert_existing = str(self.ctx.settings.get("convert_existing", "")).lower() in ("true", "1", "yes")
 
-        tracks = find_tracks_in_db(db_path, task_id, rg_mbid)
+        since_ms = None if convert_existing else self.started_at_ms
+        tracks = find_tracks_in_db(
+            db_path, task_id, rg_mbid, since_imported_at_ms=since_ms, logger=self.ctx.logger
+        )
         if not tracks:
             # Short sleep and retry once in case the database transaction is settling
             time.sleep(1.0)
-            tracks = find_tracks_in_db(db_path, task_id, rg_mbid)
+            tracks = find_tracks_in_db(
+                db_path, task_id, rg_mbid, since_imported_at_ms=since_ms, logger=self.ctx.logger
+            )
 
         if not tracks:
             self.ctx.logger.info("No matching tracks in database for task %s / mbid %s", task_id, rg_mbid)
@@ -440,15 +480,17 @@ class AutoOpusConverter:
                 continue
 
             dest = src.with_suffix(".opus")
-            rel_dest = str(Path(track.relative_path).with_suffix(".opus"))
+            rel_dest = Path(track.relative_path).with_suffix(".opus").as_posix()
 
             self.ctx.logger.info("Transcoding %s -> %s (embed_art=%s)", src.name, dest.name, embed_art)
-            if transcode_file(src, dest, bitrate, embed_art=embed_art):
+            if transcode_file(src, dest, bitrate, embed_art=embed_art, logger=self.ctx.logger):
                 db_updated = False
                 if db_path.exists():
-                    db_updated = update_track_in_db(db_path, track, dest, rel_dest)
+                    db_updated = update_track_in_db(
+                        db_path, track, dest, rel_dest, logger=self.ctx.logger
+                    )
 
-                if delete_source:
+                if delete_source and db_updated:
                     try:
                         src.unlink()
                     except OSError as err:
@@ -458,5 +500,5 @@ class AutoOpusConverter:
                     "Transcoded %s successfully (db updated: %s, deleted original: %s)",
                     dest.name,
                     db_updated,
-                    delete_source,
+                    delete_source and db_updated,
                 )

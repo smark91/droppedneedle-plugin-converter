@@ -1,4 +1,4 @@
-# DroppedNeedle Auto Opus Converter Plugin
+# DroppedNeedle Audio Converter Plugin (`droppedneedle-plugin-converter`)
 
 A native DroppedNeedle v3 plugin that automatically converts newly landed FLAC downloads into Opus format directly inside your music library.
 
@@ -23,25 +23,23 @@ Because Soulseek primarily hosts FLAC and MP3 files, this plugin listens for com
 
 ### Method 1. Install from GitHub (Recommended)
 
-1. Push this repository to GitHub (or use your repository URL).
-2. In DroppedNeedle, navigate to **Settings > Plugins**.
-3. Paste the repository URL into the **Install a plugin** field and click **Preview**.
-4. Click **Install**.
-5. Enable the plugin on its card, adjust the settings if needed, and click **Save**.
+1. In DroppedNeedle, navigate to **Settings > Plugins**.
+2. Paste the repository URL (`https://github.com/smark91/droppedneedle-plugin-converter`) into the **Install a plugin** field and click **Preview**.
+3. Click **Install**.
+4. Enable the plugin on its card, adjust the settings if needed, and click **Save**.
 
 ### Method 2. Install by hand (Docker)
 
 Copy the plugin folder into DroppedNeedle's plugins volume:
 
 ```bash
-cp -r . /path/to/droppedneedle/plugins/auto-opus-converter
+cp -r . /path/to/droppedneedle/plugins/droppedneedle-plugin-converter
 ```
 
 Then open **Settings > Plugins** in DroppedNeedle, enable the plugin, and click **Save**.
 
 ## Plugin Settings
 
-- **Music Library Root (`library_path`)**: Root path of your music library (default: `/music`).
 - **Data Cache Path (`cache_path`)**: Path to DroppedNeedle's cache directory where `library.db` is stored (default: `/app/cache`).
 - **Target Opus Bitrate (`bitrate`)**: Desired bitrate for the Opus encoder (default: `160k`).
 - **Convert Pre-existing Files (`convert_existing`)**: When `false` (default), only newly downloaded releases are converted. Older library files remain untouched. Set to `true` to sweep and convert older lossless files.

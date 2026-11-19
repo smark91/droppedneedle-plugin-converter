@@ -1,3 +1,33 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Testing and temporary files
+.pytest_cache/
+.coverage
+htmlcov/
 .staging_*
+test_plugin_*
+temp_audio.wav
+temp_art.png
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Operating system and IDE files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
